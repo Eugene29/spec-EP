@@ -1,0 +1,8 @@
+{
+  "expert_parallel": {
+    "enabled": true,
+    "autoep_size": 4,
+    "preset_model": "qwen3_5_moe",
+    "use_grouped_mm": true
+  }
+}
