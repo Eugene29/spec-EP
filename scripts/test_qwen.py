@@ -11,7 +11,8 @@ import torch
 from transformers import AutoProcessor, AutoModelForMultimodalLM
 
 # MODEL_PATH = "/dev/shm/Qwen3.6-35B-A3B"
-MODEL_PATH = "/global/cfs/cdirs/m5421/eku/speculative_expert_parallelism/models/Qwen3.6-35B-A3B"
+# MODEL_PATH = "/global/cfs/cdirs/m5421/eku/speculative_expert_parallelism/models/Qwen3.6-35B-A3B"
+MODEL_PATH = "/pscratch/sd/e/eku/spec_ep/models/Qwen3.6-35B-A3B"
 
 processor = AutoProcessor.from_pretrained(MODEL_PATH)
 
@@ -20,6 +21,7 @@ model = AutoModelForMultimodalLM.from_pretrained(
     torch_dtype=torch.bfloat16,
     device_map="auto",
 )
+model.eval()
 
 messages = [
     {
