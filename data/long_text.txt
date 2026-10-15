@@ -1,0 +1,209 @@
+The computing laboratory occupied the upper floor of a building beside the
+river. From the windows, the researchers could see delivery trucks crossing
+the bridge and small boats moving slowly along the opposite bank. Inside,
+the sound was less peaceful. Cooling fans maintained a steady roar behind
+the doors of the machine room, where rows of servers worked through jobs
+submitted by teams across the university. Some jobs simulated weather,
+others analyzed images, and several trained language models on collections
+of scientific and technical documents.
+
+On Tuesday morning, Elena arrived with a notebook containing a surprisingly
+short question: how much does placement matter? Her team had developed a
+distributed experiment that could run on four accelerators. They could place
+all four inside one server, or divide them between two servers connected
+through the laboratory network. The model, input data, and numerical
+precision would remain fixed. They wanted to understand what changed when
+some of the model's communication had to leave the local machine.
+
+The question sounded straightforward, but Elena knew that a clean answer
+required careful preparation. A distributed program could behave differently
+for reasons that had little to do with the network. One server might have
+a competing job. Another might load its data from a slower filesystem.
+Different library versions could select different kernels. Even an innocent
+change to the input passage might alter which experts received the most
+work. Before running anything expensive, the team needed a repeatable
+procedure and a clear definition of what they intended to measure.
+
+Her colleague Daniel suggested beginning with a small correctness test.
+Performance numbers would mean little if the model had not actually been
+partitioned as expected. They inspected the process identifiers, checked
+which accelerator belonged to each process, and printed the membership of
+the communication groups. They also examined the expert layers after
+initialization. A configuration file requesting expert parallelism was
+useful evidence of intent, but they wanted evidence that the running model
+contained the expected distributed layers and local expert parameters.
+
+The first attempt failed before any useful computation began. One process
+could not find the input file because it had been launched from a different
+working directory. The other processes waited for it to enter a collective
+operation. Daniel stopped the job and changed the startup procedure so that
+every process checked its inputs before beginning the distributed forward
+pass. They also made the error messages include the global rank and file
+path. The next failure, if there was one, would be easier to locate.
+
+Once the input was available everywhere, they discussed how to divide it.
+Their initial benchmark used one sequence per process, with each sequence
+containing exactly five hundred and twelve tokens. The complete experiment
+therefore contained four sequences across four processes. They tokenized
+one long document and assigned a different consecutive section to each
+rank. This avoided padding and gave them distinct inputs without requiring
+a separate file for every accelerator. The same sections would be reused
+in both placement configurations.
+
+Elena emphasized that characters and tokens were different units. Taking
+five hundred characters from a document would not reliably produce five
+hundred tokens. Common words, punctuation, technical terms, and whitespace
+could all affect tokenization. The team therefore loaded the complete text,
+converted it into token identifiers, checked the total token count, and
+only then selected the slices. They preserved the leading batch dimension
+so that each process supplied a tensor with one row and the chosen number
+of token positions.
+
+For the first forward pass, they disabled cached state and did not request
+generation. The model would process the supplied sequence once and return
+its outputs. This workload resembled the prompt-processing portion of
+inference and gave the expert layers a substantial collection of tokens to
+route. It did not include backward propagation, optimizer updates, or the
+repeated single-token steps used during autoregressive decoding. The team
+wrote those boundaries into the experiment notes to prevent later confusion
+about what the measurements represented.
+
+The successful smoke test produced an unexpected feeling of relief. There
+was no dramatic visualization, only several log messages and tensors with
+plausible shapes. Nevertheless, the result established several important
+facts at once. All processes had initialized, the input tensors were on the
+correct devices, the distributed expert layers had executed, and the job
+had completed without a communication mismatch. The researchers saved the
+configuration and software versions before moving on to timing.
+
+They began with warmup iterations. The earliest execution could include
+memory allocation, lazy initialization, kernel loading, and other setup
+costs. Those activities mattered for startup latency, but they were not
+the subject of this experiment. The team wanted to characterize repeated
+forward passes after the system had reached a stable operating state.
+They therefore kept startup measurements separate and made sure every
+process completed its warmup before the timed section began.
+
+Timing accelerator work required another small adjustment in perspective.
+The host program could submit operations and continue running before the
+device finished them. Measuring only the duration of the Python function
+call could therefore underestimate the actual work. For their simple
+baseline, the researchers synchronized at the measurement boundaries.
+They also gathered elapsed times from all participating processes, because
+the distributed iteration could not be considered complete while its
+slowest participant was still working.
+
+After several repetitions, Daniel plotted the iteration durations. Most
+samples clustered closely together, but a few were noticeably slower.
+Rather than removing those samples immediately, he checked whether they
+corresponded to external activity or recurring events in the program.
+A median described typical behavior, while higher percentiles exposed
+occasional delays. Both were useful. A system with excellent average
+throughput could still be inconvenient if its latency varied widely from
+one iteration to the next.
+
+The team then moved the same four-process job across two servers. Each
+server contributed two accelerators, and the expert parallel group still
+contained four ranks. They deliberately avoided increasing the number of
+devices at the same time. If they had compared four local devices with
+eight distributed devices, the result would have mixed changes in model
+partitioning, total workload, and communication placement. Holding the group
+size constant gave them a narrower and more interpretable comparison.
+
+The distributed run completed successfully, but its iteration time was
+higher. That observation alone did not explain the cause. Communication
+might be slower across the network, yet the extra time could also reflect
+different arrival times at collective operations. A rank with more expert
+assignments might delay its peers. Small operations might become sensitive
+to launch overhead. Some transfers could overlap with computation, while
+others might lie directly on the critical path. They needed a timeline
+before drawing stronger conclusions.
+
+For profiling, Elena selected a short window of steady-state iterations.
+Collecting every event from a long run would produce large traces and
+make inspection cumbersome. Each rank wrote its own trace with a unique
+filename. The researchers enabled the activities needed to observe host
+operations and accelerator kernels, then added more detailed information
+only when a specific question justified the overhead. Benchmark timing
+and profiling were conducted in separate runs so that instrumentation
+would not distort their primary performance numbers.
+
+The first timeline showed alternating regions of dense computation,
+routing work, expert computation, and communication. Some operations were
+easy to recognize, while others required inspecting their parent calls.
+Daniel traced the dispatch of activations toward the owning expert ranks
+and the return of expert outputs toward their originating ranks. He was
+careful not to add every communication duration together and label the
+sum as removable overhead. Operations could overlap, and their contribution
+to elapsed time depended on where they appeared in the execution schedule.
+
+A particularly interesting region appeared near the middle of the model.
+One rank spent longer in expert computation than its neighbors, and the
+others appeared to wait afterward. The network transfer itself was not
+necessarily responsible for the full visible delay. The team examined the
+number of assignments received by each rank and found an uneven distribution.
+This was a useful reminder that expert parallelism involved both moving
+data and balancing computation. A faster transport could help without
+eliminating every source of waiting.
+
+They also inspected the model's nonexpert components. Attention, shared
+experts, normalization, and output projection still consumed time and
+memory. An experiment described as an expert parallel benchmark could
+be dominated by other operations if its sequence length or implementation
+made those components especially expensive. The team kept whole-model
+latency as the main outcome, while using layer-level evidence to explain
+it. They did not assume that the largest individual kernel was the best
+optimization target.
+
+By late afternoon, they were ready to vary the workload. They first
+increased sequence length while leaving the per-process batch size fixed.
+Longer sequences supplied more token assignments to the expert layers,
+but also increased work elsewhere in the model. Next, they considered
+increasing batch size at a fixed sequence length. These experiments could
+produce the same total number of tokens with different attention shapes,
+so the team recorded both dimensions rather than reducing every workload
+to a single token count.
+
+The researchers resisted the temptation to change several settings at
+once. A different communication backend, a new attention implementation,
+and a larger batch might all improve throughput, but a combined change
+would make the source of improvement difficult to identify. Their baseline
+remained deliberately simple. New configurations would be compared against
+it one at a time, with the same inputs, device placement, and measurement
+procedure wherever possible. This approach was slower than collecting
+many arbitrary numbers, but faster than explaining contradictory results.
+
+At the next meeting, Elena presented the findings as a set of observations
+rather than a universal ranking. The local configuration had lower latency
+for the workloads they tested. The distributed configuration exposed more
+communication and waiting in several expert layers. Larger token batches
+changed the balance between computation and transfer. None of these facts
+proved that one topology would always be preferable. Larger models, memory
+constraints, training workloads, and different networks could change the
+practical choice.
+
+Their eventual goal was training, which introduced additional questions.
+Backward propagation would generate gradients and reverse some activation
+flows. Replicated parameters would require appropriate synchronization.
+Activation checkpointing could repeat parts of the forward computation,
+and optimizer state would alter the memory budget. The inference experiment
+had established a useful foundation, but it had not measured those costs.
+The next phase would preserve the verified setup while adding training
+components in controlled steps.
+
+Before leaving, Daniel organized the experiment directory. It contained
+the launch commands, configuration files, input passage, software versions,
+timing summaries, and selected profiler traces. He added a short explanation
+of the rank layout on each server and the exact definition of reported
+throughput. Someone returning a month later should be able to reproduce
+the experiment without reconstructing its assumptions from memory. Good
+records were part of the result, not merely administrative work afterward.
+
+Outside, the evening light reflected from the river onto the laboratory
+windows. The team had answered a smaller question than the one they began
+with, but they had answered it carefully. They knew that the model executed
+with the intended expert partitioning, that both placements used matched
+inputs, and that their measurements represented completed distributed
+forward passes. More importantly, they now had a method for investigating
+the next question without losing track of what each experiment could
+actually establish.

@@ -7,8 +7,15 @@ Notes:
 """
 
 
+import argparse
+
 import torch
-from transformers import AutoProcessor, AutoModelForMultimodalLM
+from transformers import AutoConfig, AutoProcessor, AutoModelForMultimodalLM
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--load-weights", action="store_true", 
+                    help="Build the model from config with random weights.")
+args = parser.parse_args()
 
 # MODEL_PATH = "/dev/shm/Qwen3.6-35B-A3B"
 # MODEL_PATH = "/global/cfs/cdirs/m5421/eku/speculative_expert_parallelism/models/Qwen3.6-35B-A3B"
@@ -16,11 +23,30 @@ MODEL_PATH = "/pscratch/sd/e/eku/spec_ep/models/Qwen3.6-35B-A3B"
 
 processor = AutoProcessor.from_pretrained(MODEL_PATH)
 
+def write_random_weights(model_path, ckpt_dir):
+    print('Writing random weights...')
+    config = AutoConfig.from_pretrained(model_path)
+    model = AutoModelForMultimodalLM.from_config(
+        config,
+        torch_dtype=torch.bfloat16,
+    )
+    model.save_pretrained(ckpt_dir)
+    del model  # Release the original parameters before reloading.
+    print('Done...')
+    return ckpt_dir
+
+if args.load_weights:
+    ckpt_dir = MODEL_PATH
+else:
+    ckpt_dir="/dev/shm/random_model"
+    write_random_weights(MODEL_PATH, ckpt_dir)
+    
 model = AutoModelForMultimodalLM.from_pretrained(
-    MODEL_PATH,
+    ckpt_dir,
     torch_dtype=torch.bfloat16,
     device_map="auto",
 )
+
 model.eval()
 
 messages = [
