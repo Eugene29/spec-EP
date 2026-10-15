@@ -1,5 +1,5 @@
 {
-  "train_micro_batch_size_per_gpu": 1,
+  "train_micro_batch_size_per_gpu": 16,
   "expert_parallel": {
     "enabled": true,
     "autoep_size": 4,
