@@ -1,5 +1,6 @@
 import json
 import os
+import time
 import torch
 import deepspeed
 import torch.distributed as dist
@@ -9,9 +10,19 @@ from transformers import AutoTokenizer, Qwen3_5MoeForCausalLM
 from datetime import datetime
 from pathlib import Path
 
+from torch.profiler import profile, ProfilerActivity, record_function
+
+# Export env for srun launcher
+if "RANK" not in os.environ:
+    os.environ["RANK"] = os.environ["SLURM_PROCID"]
+    os.environ["WORLD_SIZE"] = os.environ["SLURM_NTASKS"]
+    os.environ["LOCAL_RANK"] = os.environ["SLURM_LOCALID"]
+    
 rank = int(os.environ["RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
+logs = Path(os.environ["LOGS"])
 # local_rank = int(os.environ["LOCAL_RANK"])
+
 
 def print0(msg):
     if rank == 0:
@@ -47,8 +58,8 @@ def load_model(model_id):
         )
     return model
         
-def init_deepspeed(model):
-    with open("configs/qwen_ep.json", 'r') as file:
+def init_deepspeed(model, ds_config_pth):
+    with open(ds_config_pth, 'r') as file:
         ds_config = json.load(file)
 
     # Then apply the AutoEP config from above.
@@ -64,7 +75,7 @@ def init_deepspeed(model):
 def get_batch(model_id, dev, seq_len):
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     
-    text = Path("data/long_text.txt").read_text(encoding="utf-8")
+    text = Path("data/short_text.txt").read_text(encoding="utf-8")
     text = " ".join(text.split())
     
     tokens = tokenizer(
@@ -119,37 +130,85 @@ def end_flops_profile(prof, outdir):
           f"{params/1e9:.2f}B local params", flush=True)
     prof.end_profile()
     
-def make_outdir(base="logs"):
-    # NOTE: broadcast the log if you need to print on more than rank 0
-    if rank == 0:
-        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        outdir = Path(base) / stamp
-        (outdir / "profile").mkdir(parents=True, exist_ok=True)
-        return outdir
-    else:
-        return None
-    
+def torch_profile_ctx():
+    return profile(
+        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=False,        # True gives source lines but makes traces much larger
+        with_flops=True,
+    )
+
+def save_torch_profile(prof, outdir, verbose=False):
+    trace = outdir / "profile" / f"trace_rank{rank}.json"
+    prof.export_chrome_trace(str(trace))
+
+    events = prof.key_averages()
+    total_flops = sum(e.flops for e in events)   # per-rank, from the profiled step
+    print(f"rank {rank}: torch-profiler counted {total_flops/1e12:.2f} TFLOPs "
+          f"(aten ops only)", flush=True)
+          
+    if verbose and (rank == 0):
+        table = events.table(sort_by="cuda_time_total", row_limit=30)
+        (outdir / "profile" / "key_averages.txt").write_text(table)
+        
+# def get_avg_flops_per_gpu(engine, batch):
+#     """Not supported after compiled"""
+#     # TODO: Fix the flops looking terrible. Too bad to be true.
+#     prof = FlopsProfiler(engine.module)      # run BEFORE engine.compile()
+#     prof.start_profile()
+#     with torch.inference_mode():
+#         engine(**batch, use_cache=False)
+#     prof.stop_profile()
+#     f = torch.tensor([float(prof.get_total_flops())], device=engine.device)
+#     prof.end_profile()
+#     tot = f.clone()
+#     dist.all_reduce(tot)
+#     print0(f"flops/GPU avg {tot.item()/world_size/1e12:.2f} T")
+#     return tot.item()
+        
 def main():
     model_id = "/pscratch/sd/e/eku/spec_ep/models/Qwen3.6-35B-A3B"
     seq_len = 4096
+    # ds_config_pth = "configs/qwen_ep4.json"
+    ds_config_pth = "configs/qwen_ep8.json"
     
     model = load_model(model_id)
-    engine = init_deepspeed(model)
-    engine.compile()
+    engine = init_deepspeed(model, ds_config_pth)
     batch = get_batch(model_id, engine.device, seq_len)
-    outdir = make_outdir()
+    engine.compile()
+    
 
     with torch.inference_mode():
         # warmup
         engine(**batch, use_cache=False)
+        engine(**batch, use_cache=False)
+
+        # Calculate flops without profiler
+        # strt = time.time()
+        # torch.cuda.synchronize(engine.device)
+        # engine(**batch, use_cache=False)
+        # torch.cuda.synchronize(engine.device)
+        # dur = time.time() - strt
+        # TFlops_per_gpu = total_flop_count / dur / 1e12 / world_size
+        # print(f"[{rank}] real TFlops: {TFlops_per_gpu}", flush=True)
         
-        prof = start_flops_profile(engine)
-        outputs = engine(**batch, use_cache=False)
-        torch.cuda.synchronize(engine.device)
-        end_flops_profile(prof, outdir)
+        # Torch profiler pass. The FLOPs profiler hooks are left out, since they add overhead.
+        with torch_profile_ctx() as tprof:
+            with record_function("forward"):
+                outputs = engine(**batch, use_cache=False)
+            torch.cuda.synchronize(engine.device)
+        save_torch_profile(tprof, outdir=logs)
+
+        # DeepSpeed Flops profiler.
+        # prof = start_flops_profile(engine)
+        # outputs = engine(**batch, use_cache=False)
+        # torch.cuda.synchronize(engine.device)
+        # end_flops_profile(prof, outdir=logs)
+        
 
     # bookeeping
-    print(f"[{rank}] outputs: {outputs}", flush=True)
+    print(f"[{rank}] outputs: {outputs.logits.shape}", flush=True)
     report_peak_mem(engine.device)
     shutdown_comm()
 
