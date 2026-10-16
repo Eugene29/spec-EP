@@ -16,7 +16,10 @@ export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29500
 python="/dev/shm/spec-EP/bin/python"
 
-mkdir -p "$LOGS/profile"
+# TODO: insert src into lib search path
+mkdir -export PYTHONPATH=$PWD/src:$PYTHONPATH
+
+p "$LOGS/profile"
 
 # Broadcast the env tarball to every node, extract once per node.
 sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
