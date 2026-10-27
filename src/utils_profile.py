@@ -66,9 +66,11 @@ def save_torch_profile(prof, outdir, verbose=False):
     prof.export_chrome_trace(str(trace))
 
     events = prof.key_averages()
-    total_flops = sum(e.flops for e in events)   # per-rank, from the profiled step
-    print(f"rank {rank}: torch-profiler counted {total_flops/1e12:.2f} TFLOPs "
-          f"(aten ops only)", flush=True)
+    
+    # Below seems a lot lower than ds flops profiler
+    # total_flops = sum(e.flops for e in events)   # per-rank, from the profiled step
+    # print(f"rank {rank}: torch-profiler counted {total_flops/1e12:.2f} TFLOPs "
+    #       f"(aten ops only)", flush=True)
           
     if verbose and (rank == 0):
         table = events.table(sort_by="cuda_time_total", row_limit=30)

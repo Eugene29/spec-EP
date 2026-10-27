@@ -14,7 +14,6 @@ export NCCL_DEBUG=NET
 export LOGS="logs/$(date +%Y-%m-%d_%H-%M-%S)"
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n1)
 export MASTER_PORT=29500
-python="/dev/shm/spec-EP/bin/python"
 
 mkdir -p "$LOGS/profile"
 
@@ -24,7 +23,14 @@ srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
 
 # Only activates conda env, already bcasted.
 # Env actiavted on main and CONDA_PREFIX bcasted
+module load conda # `conda` shell function isn't inherited by non-interactive bash
 source ~/conda_trick.sh
 
+# Scripts import `benchmark.*`, which needs the repo root on the path.
+export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+
 srun --ntasks-per-node=4 \
-     /dev/shm/spec-EP/bin/python -u benchmark/all2all/all2all.py logs/2026-10-16_14-07-50 0
+     python -u benchmark/all2all/all2all.py logs/2026-10-16_14-07-50 0
+
+# srun --ntasks-per-node=4 \
+#      python -u benchmark/all2all/premptive_partition.py logs/2026-10-16_14-07-50 0

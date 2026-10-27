@@ -1,8 +1,16 @@
+"""Run MoE model with deepspeed's AutoEP
+
+Note:
+    Using Qwen3.6 35B-A3B
+"""
+
+import argparse
 import json
 import os
 import time
 import torch
 import deepspeed
+import deepspeed.comm as dist
 
 from transformers import AutoTokenizer, Qwen3_5MoeForCausalLM
 from pathlib import Path
@@ -87,12 +95,13 @@ def record_expert_routing(engine, batch):
 
 def record_latency(engine, batch):
     """Calculate latency and flops without profiler"""
+    # dist.barrier() # TODO: 
     strt = time.time()
     torch.cuda.synchronize(engine.device)
     engine(**batch, use_cache=False)
     torch.cuda.synchronize(engine.device)
     dur = time.time() - strt
-    print(f"dur: {dur}", flush=True)
+    print(f"[{rank}] dur: {dur}", flush=True)
     # TFlops_per_gpu = total_flop_count / dur / 1e12 / world_size
     # print(f"[{rank}] real TFlops: {TFlops_per_gpu}", flush=True)
     
@@ -111,24 +120,42 @@ def run_ds_flops_profile(engine, batch):
     torch.cuda.synchronize(engine.device)
     end_flops_profile(prof, outdir=logs)
 
+def parse_args():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config-pth", type=str, default="configs/qwen_ep8.json",
+                        help="Path to the DeepSpeed config-pth (e.g. configs/qwen_ep4.json)")
+    # deepspeed launcher may inject --local_rank; ignore unknown args
+    args, _ = parser.parse_known_args()
+    return args
+
+def run_ds_comm_profile(engine, batch):
+    """DeepSpeed comms logger: per-op count, msg size, latency, algbw/busbw."""
+    # TODO: hangs at the end for some reason.
+    if hasattr(dist.comms_logger, "reset_data"):
+        dist.comms_logger.reset_data()  # drop warmup/init comms
+    outputs = engine(**batch, use_cache=False)
+    torch.cuda.synchronize(engine.device)
+    dist.log_summary(show_straggler=True)   # collective; call on ALL ranks
+
 def main():
     model_id = "/pscratch/sd/e/eku/spec_ep/models/Qwen3.6-35B-A3B"
     seq_len = 4096
-    # ds_config_pth = "configs/qwen_ep4.json"
-    ds_config_pth = "configs/qwen_ep8.json"
-    
+    args = parse_args()
+
     model = load_model(model_id)
-    engine = init_deepspeed(model, ds_config_pth)
+    engine = init_deepspeed(model, args.config_pth)
     batch = get_batch(model_id, engine.device, seq_len)
 
     with torch.inference_mode():
         # compile + warmup
         engine.compile()
         engine(**batch, use_cache=False)
+        engine(**batch, use_cache=False)
     
         # record_expert_routing(engine, batch)
-        record_latency(engine, batch)
-        # run_pytorch_profile(engine, batch)
+        # record_latency(engine, batch)
+        # run_ds_comm_profile(engine, batch)
+        run_pytorch_profile(engine, batch)
         # run_ds_flops_profile(engine, batch)
 
     # bookeeping

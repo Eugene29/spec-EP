@@ -17,9 +17,8 @@ export MASTER_PORT=29500
 python="/dev/shm/spec-EP/bin/python"
 
 # TODO: insert src into lib search path
-mkdir -export PYTHONPATH=$PWD/src:$PYTHONPATH
-
-p "$LOGS/profile"
+export PYTHONPATH=$PWD/src:$PYTHONPATH
+mkdir -p "$LOGS/profile"
 
 # Broadcast the env tarball to every node, extract once per node.
 sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
@@ -29,5 +28,12 @@ srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
 # Env actiavted on main and CONDA_PREFIX bcasted
 source ~/conda_trick.sh
 
+# TODO: Logger info
+# TODO: install tutel
+# TODO: Try tutel and DeepEP and profile them
+
 # Q. need --gpu-bind=none?
-srun --ntasks-per-node=4 $python -u scripts/ds_moe.py 2>&1 | tee "$LOGS/run.log"
+srun --ntasks-per-node=4 $python -u scripts/ds_moe.py \
+    --config-pth="configs/qwen_ep4.json" \
+    2>&1 | tee "$LOGS/run.log"
+    # --config-pth="configs/qwen_ep8.json" \
