@@ -15,19 +15,18 @@ expert in bf16. Experts are sent as one flat buffer.
 
 Usage:
     # 2 nodes: each GPU swaps with its counterpart on the other node
-    srun -N 2 --ntasks-per-node=4 python -u benchmark/expert_send_recv_parallel.py
+    srun -N 2 --ntasks-per-node=4 python -u benchmark/internode/expert_send_recv_parallel.py
 
     # 4 nodes: each GPU sends to the next node and receives from the previous
-    srun -N 4 --ntasks-per-node=4 python -u benchmark/expert_send_recv_parallel.py
+    srun -N 4 --ntasks-per-node=4 python -u benchmark/internode/expert_send_recv_parallel.py
 """
 import argparse
 import os
-import socket
 
 import torch
 import torch.distributed as dist
 
-from benchmark.utils import init_dist
+from benchmark.utils import check_placement, init_dist
 
 
 def get_ring_peers(rank: int, world: int, gpus_per_node: int) -> tuple[int, int]:
@@ -40,33 +39,6 @@ def get_ring_peers(rank: int, world: int, gpus_per_node: int) -> tuple[int, int]
     next_rank = (rank + gpus_per_node) % world
     prev_rank = (rank - gpus_per_node) % world
     return next_rank, prev_rank
-
-
-def check_placement(gpus_per_node: int) -> list[str]:
-    """Check ranks fill at least 2 nodes in blocks of gpus_per_node.
-
-    Block order (ranks 0-3 on node 0, 4-7 on node 1, ...) is what makes
-    get_ring_peers land on the same local rank of a different node.
-
-    Returns:
-        Hostname of every rank.
-    """
-    world = dist.get_world_size()
-    if world % gpus_per_node != 0:
-        raise RuntimeError(f"{world} ranks is not a multiple of {gpus_per_node} per node.")
-
-    num_nodes = world // gpus_per_node
-    if num_nodes < 2:
-        raise RuntimeError(f"Expected at least 2 nodes, got {num_nodes}. Use srun -N 2 or more.")
-
-    hosts = [None] * world
-    dist.all_gather_object(hosts, socket.gethostname())
-
-    # Every node should be a different host.
-    node_hosts = hosts[::gpus_per_node]
-    if len(set(node_hosts)) != num_nodes:
-        raise RuntimeError(f"Some nodes share a host: {node_hosts}.")
-    return hosts
 
 
 def benchmark(

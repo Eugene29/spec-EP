@@ -3,30 +3,19 @@
 Loads the recording of [token, experts] and mimics all2all.
 
 srun --ntasks-per-node=4 \
-  python -u benchmark/all2all/all2all.py logs/2026-10-16_14-07-50 0
+  python -u benchmark/all2all/even_vs_uneven.py logs/2026-10-16_14-07-50 0
 """
-import os
 import sys
 import numpy as np
 import torch
 import torch.distributed as dist
 
+from benchmark.utils import init_dist
+
 E, H = 256, 2048
 WARMUP = 3
 ITERATIONS = 5
 SCALE = 1
-
-
-def init_dist():
-    """Init NCCL from SLURM env. Returns (rank, world, device)."""
-    rank = int(os.environ["SLURM_PROCID"])
-    world = int(os.environ["SLURM_NTASKS"])
-    local_rank = int(os.environ["SLURM_LOCALID"])
-
-    torch.cuda.set_device(local_rank)
-    device = torch.device("cuda", local_rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world, device_id=device)
-    return rank, world, device
 
 
 # Count rows sent between every pair of ranks.
