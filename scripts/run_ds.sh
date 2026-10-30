@@ -20,9 +20,14 @@ python="/dev/shm/spec-EP/bin/python"
 export PYTHONPATH=$PWD/src:$PYTHONPATH
 mkdir -p "$LOGS/profile"
 
-# Broadcast the env tarball to every node, extract once per node.
-sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
-srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
+# Broadcast the env tarball to every node
+if ! srun --ntasks-per-node=1 test -f /dev/shm/spec-EP.tar; then
+    sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
+fi
+# Extract the env tarball to /dev/shm
+if ! srun --ntasks-per-node=1 test -d /dev/shm/spec-EP; then
+    srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
+fi
 
 # Only activates conda env, already bcasted.
 # Env actiavted on main and CONDA_PREFIX bcasted
@@ -32,8 +37,8 @@ source ~/conda_trick.sh
 # TODO: install tutel
 # TODO: Try tutel and DeepEP and profile them
 
-# Q. need --gpu-bind=none?
 srun --ntasks-per-node=4 $python -u scripts/ds_moe.py \
     --config-pth="configs/qwen_ep4.json" \
     2>&1 | tee "$LOGS/run.log"
+# Q. need --gpu-bind=none?
     # --config-pth="configs/qwen_ep8.json" \

@@ -1,5 +1,8 @@
 """Forward-only GEMM and Flash Attention benchmarks.
 
+Takes in hyper-parameters and computes the memory and TFLOPs of GEMM 
+and Flash Attention.
+
 Usage:
     python benchmark/compute.py
 """

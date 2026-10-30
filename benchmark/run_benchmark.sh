@@ -17,9 +17,14 @@ export MASTER_PORT=29500
 
 mkdir -p "$LOGS/profile"
 
-# Broadcast the env tarball to every node, extract once per node.
-sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
-srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
+# Broadcast the env tarball to every node
+if ! srun --ntasks-per-node=1 test -f /dev/shm/spec-EP.tar 2> /dev/null; then
+    sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
+fi
+# Extract the env tarball to /dev/shm
+if ! srun --ntasks-per-node=1 test -d /dev/shm/spec-EP 2> /dev/null; then
+    srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
+fi
 
 # Only activates conda env, already bcasted.
 # Env actiavted on main and CONDA_PREFIX bcasted
@@ -29,8 +34,4 @@ source ~/conda_trick.sh
 # Scripts import `benchmark.*`, which needs the repo root on the path.
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 
-srun --ntasks-per-node=4 \
-     python -u benchmark/all2all/all2all.py logs/2026-10-16_14-07-50 0
-
-# srun --ntasks-per-node=4 \
-#      python -u benchmark/all2all/premptive_partition.py logs/2026-10-16_14-07-50 0
+srun -N 4 --ntasks-per-node=4 python -u benchmark/expert_send_recv_parallel.py

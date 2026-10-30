@@ -87,38 +87,36 @@ def get_batch(model_id, dev, seq_len):
     return batch
 
 def record_expert_routing(engine, batch):
-    """Save expert routing statistics (not a2a)"""
+    """Save expert routing statistics (tokens per expert)
+    
+    Q. What does it store? 
+    """
     sent = {}
     add_expert_statistics_hook(engine.module, sent)
     engine(**batch, use_cache=False)
     torch.save(torch.stack(list(sent.values())), logs / f"experts_rank{rank}.pt")
 
 def record_latency(engine, batch):
-    """Calculate latency and flops without profiler"""
+    """Purely times the latency"""
     # dist.barrier() # TODO: 
-    strt = time.time()
     torch.cuda.synchronize(engine.device)
+    dist.barrier()
+    strt = time.time()
     engine(**batch, use_cache=False)
     torch.cuda.synchronize(engine.device)
+    dist.barrier()
     dur = time.time() - strt
     print(f"[{rank}] dur: {dur}", flush=True)
     # TFlops_per_gpu = total_flop_count / dur / 1e12 / world_size
     # print(f"[{rank}] real TFlops: {TFlops_per_gpu}", flush=True)
     
 def run_pytorch_profile(engine, batch):
-    """Torch profiler pass. The FLOPs profiler hooks are left out, since they add overhead."""
+    """Run pytorch profiler"""
     with torch_profile_ctx() as tprof:
         with record_function("forward"):
             outputs = engine(**batch, use_cache=False)
         torch.cuda.synchronize(engine.device)
     save_torch_profile(tprof, outdir=logs)
-
-def run_ds_flops_profile(engine, batch):
-    """DeepSpeed Flops profiler"""
-    prof = start_flops_profile(engine)
-    outputs = engine(**batch, use_cache=False)
-    torch.cuda.synchronize(engine.device)
-    end_flops_profile(prof, outdir=logs)
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -127,6 +125,13 @@ def parse_args():
     # deepspeed launcher may inject --local_rank; ignore unknown args
     args, _ = parser.parse_known_args()
     return args
+
+def run_ds_flops_profile(engine, batch):
+    """DeepSpeed Flops profiler"""
+    prof = start_flops_profile(engine)
+    engine(**batch, use_cache=False)
+    torch.cuda.synchronize(engine.device)
+    end_flops_profile(prof, outdir=logs)
 
 def run_ds_comm_profile(engine, batch):
     """DeepSpeed comms logger: per-op count, msg size, latency, algbw/busbw."""
@@ -148,14 +153,20 @@ def main():
 
     with torch.inference_mode():
         # compile + warmup
-        engine.compile()
-        engine(**batch, use_cache=False)
-        engine(**batch, use_cache=False)
-    
+        # print0("first")
+        # record_latency(engine, batch)
+        # engine.compile()
+        record_latency(engine, batch)
+        # record_latency(engine, batch)
+        # record_latency(engine, batch)
+
+        run_ds_flops_profile(engine, batch)
+
+        # engine(**batch, use_cache=False)
         # record_expert_routing(engine, batch)
         # record_latency(engine, batch)
         # run_ds_comm_profile(engine, batch)
-        run_pytorch_profile(engine, batch)
+        # run_pytorch_profile(engine, batch)
         # run_ds_flops_profile(engine, batch)
 
     # bookeeping

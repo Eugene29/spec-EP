@@ -1,6 +1,9 @@
 """Benchmark of all2all in uneven (real workload) and even workload.
 
 Loads the recording of [token, experts] and mimics all2all.
+
+srun --ntasks-per-node=4 \
+  python -u benchmark/all2all/all2all.py logs/2026-10-16_14-07-50 0
 """
 import os
 import sys

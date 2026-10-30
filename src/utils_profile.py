@@ -4,7 +4,7 @@ from torch.profiler import profile, ProfilerActivity, record_function
 from deepspeed.profiling.flops_profiler import FlopsProfiler
 from deepspeed.module_inject.auto_ep_layer import AutoEPMoELayer
 
-from utils import get_rank_and_world_size
+from utils import get_rank_and_world_size, print0
 
 rank, world_size = get_rank_and_world_size()
 
@@ -42,14 +42,11 @@ def start_flops_profile(engine):
     
 def end_flops_profile(prof, outdir):
     prof.stop_profile()
-    if rank == 0:
-        prof.print_model_profile(profile_step=1, module_depth=-1, top_modules=3,
-                                 detailed=True, 
-                                 output_file=str(outdir / "flops_profile.txt"))
-    flops = prof.get_total_flops()
+    prof.print_model_profile(profile_step=1, module_depth=-1, top_modules=3,
+                                detailed=True, 
+                                output_file=str(outdir / f"flops_profile_{rank}.txt"))
     params = prof.get_total_params()
-    print(f"rank {rank}: {flops/1e12:.2f} TFLOPs (fwd), "
-          f"{params/1e9:.2f}B local params", flush=True)
+    print0(f"{params/1e9:.2f}B local params")
     prof.end_profile()
     
 def torch_profile_ctx():
