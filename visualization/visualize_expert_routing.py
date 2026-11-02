@@ -1,4 +1,32 @@
-# visualization/visualize_expert_routing.py
+"""Plot a histogram of expert popularity across experts and GPUs.
+
+Reads one or more `experts_rank{r}.pt` files written by
+`scripts/ds_moe.py::record_expert_routing`. Each file holds a tensor of shape
+[L, T, K]: for every MoE layer L and every token T on that rank, the ids of
+the top-K experts it was routed to. Files are concatenated along the token
+dim.
+
+The figure has one row per layer and four columns:
+    1. tokens per expert   -- histogram over expert ids (raw order).
+    2. experts, sorted     -- same counts sorted high to low, which shows how
+                              skewed the load is regardless of which experts
+                              are hot.
+    3. tokens per GPU      -- counts summed over each GPU's contiguous block
+                              of `num_experts // num_gpus` experts, i.e. the
+                              load each rank would receive under static
+                              expert parallelism.
+    4. GPUs, sorted        -- per-GPU counts sorted high to low.
+
+A red dashed line in each panel marks the mean, the load every expert/GPU
+would get under perfect balance. The PNG is saved next to
+the first input file, with the same stem.
+
+Usage:
+    python visualization/visualize_expert_routing.py logs/2026_oct/2026-10-16_14-07-50/experts_rank*.pt
+    
+    python visualization/visualize_expert_routing.py $LOGS/experts_rank*.pt \\
+        --num_experts 256 --num_gpus 8 --row_h 1.8
+"""
 import argparse
 from pathlib import Path
 
@@ -11,7 +39,6 @@ ap = argparse.ArgumentParser()
 ap.add_argument("files", nargs="+", type=Path, help="experts_rank*.pt, each [L, T, K]")
 ap.add_argument("--num_experts", type=int, default=256)
 ap.add_argument("--num_gpus", type=int, default=8)
-ap.add_argument("--row_h", type=float, default=1.8, help="inches of height per layer")
 args = ap.parse_args()
 
 E = torch.cat([torch.load(f).long() for f in args.files], dim=1)   # [L, T_total, K]
@@ -19,7 +46,7 @@ L = E.shape[0]
 experts_per_gpu = args.num_experts // args.num_gpus
 
 fig, axes = plt.subplots(
-    L, 4, figsize=(20, args.row_h * L), squeeze=False,
+    L, 4, figsize=(20, 1.8 * L), squeeze=False,
     gridspec_kw={"width_ratios": [4, 4, 1.5, 1.5]},
 )
 col_titles = ["tokens per expert", "experts, sorted", "tokens per GPU", "GPUs, sorted"]

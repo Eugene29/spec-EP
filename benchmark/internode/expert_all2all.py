@@ -7,10 +7,9 @@ worth of bytes as the ring in expert_send_recv_parallel.py, so the two are
 directly comparable. With 2 nodes the all-to-all is the same bidirectional
 swap as the ring.
 
-This measures whether internode bisection bandwidth is faster than ring.
-
-Also, with --balance uneven, we can test whether uneven all2all can be slower 
-than even all2all in internode setting. 
+With --balance uneven, we can test whether uneven all2all can be slower 
+than even all2all in internode setting. There are two uneven balance modes: 
+intra-node or inter-node imbalance.
 
 The expert architecture assumes a gated FFNN (e.g. SwiGLU), as in
 Qwen3.6-35B-A3B: each expert holds gate and up projections [I, H] and a
@@ -27,7 +26,7 @@ Usage:
     srun -N 4 --ntasks-per-node=4 python -u benchmark/internode/expert_all2all.py
 
     # 4 nodes, uneven: nodes 0-1 send 1.5N experts, nodes 2-3 send 0.5N
-    srun -N 4 --ntasks-per-node=4 python -u benchmark/internode/expert_all2all.py --balance uneven
+    srun -N 4 --ntasks-per-node=4 python -u benchmark/internode/expert_all2all.py --balance uneven_internode
 """
 import argparse
 import os
@@ -38,58 +37,87 @@ import torch.distributed as dist
 from benchmark.utils import check_placement, init_dist
 
 
-def get_peer_group(rank: int, world: int, gpus_per_node: int) -> dist.ProcessGroup:
-    """Group this rank with the same local rank on every node.
+def get_splits(
+    numel: int,
+    rank: int,
+    gpus_per_node: int,
+    balance: str,
+    load_delta: float,
+) -> tuple[list[int], list[int]]:
+    """Elements this rank sends to and receives from every rank.
+
+    Each rank sends numel scaled by 1 (even), or by 1 +/- load_delta for the
+    first / second half of nodes (uneven_internode) or of local ranks on every
+    node (uneven_intranode), split evenly across all ranks on other nodes.
+    Nothing goes to ranks on the same node, so every byte crosses the network.
 
     Returns:
-        group: ranks local_rank, local_rank + gpus_per_node, ...; this rank's
-            index in it is its node index.
+        send_splits: elements this rank sends to each rank.
+        recv_splits: elements this rank receives from each rank.
     """
-    group = None
-    for local_rank in range(gpus_per_node):
-        ranks = list(range(local_rank, world, gpus_per_node))
-        g = dist.new_group(ranks)
-        if rank in ranks:
-            group = g
-    return group
+    world = dist.get_world_size()
+    num_nodes = world // gpus_per_node
+    num_remote = world - gpus_per_node
 
+    # Nothing to or from this node's own ranks, so every byte crosses the network.
+    my_node = rank // gpus_per_node
+    same_node = [r // gpus_per_node == my_node for r in range(world)]
 
-def get_split_matrix(numel: int, num_nodes: int, balance: str) -> list[list[int]]:
-    """Elements each node sends to each other node, split evenly across the other nodes.
-
-    With even balance every node sends numel. With uneven balance the first half
-    of nodes send 1.5 * numel and the second half 0.5 * numel, so the average
-    stays numel. Nothing goes to a node's own node, so every byte crosses the network.
-
-    Returns:
-        splits: splits[src][dst] is elements src sends to dst.
-    """
     if balance == "even":
-        sends = [numel] * num_nodes
-    else:
-        if num_nodes % 2 != 0 or numel % 2 != 0:
-            raise RuntimeError(f"Uneven balance needs an even number of nodes and elements, "
-                               f"got {num_nodes} nodes and {numel} elements.")
-        half = num_nodes // 2
-        sends = [numel * 3 // 2] * half + [numel // 2] * half
+        # Every rank sends the same chunk, so send and recv splits match.
+        if numel % num_remote != 0:
+            raise RuntimeError(f"{numel} elements don't split evenly across {num_remote} ranks.")
+        chunk = numel // num_remote
+        splits = [0 if same else chunk for same in same_node]
+        return splits, splits
 
-    splits = []
-    for src, send in enumerate(sends):
-        if send % (num_nodes - 1) != 0:
-            raise RuntimeError(f"{send} elements don't split evenly across {num_nodes - 1} nodes.")
-        chunk = send // (num_nodes - 1)
-        splits.append([0 if dst == src else chunk for dst in range(num_nodes)])
-    return splits
+    # Heavy ranks send numel * (1 + load_delta), light ranks numel * (1 - load_delta),
+    # so with half of each the average stays numel.
+    heavy_chunk = numel * (1 + load_delta) / num_remote
+    light_chunk = numel * (1 - load_delta) / num_remote
+    if heavy_chunk != int(heavy_chunk) or light_chunk != int(light_chunk):
+        raise RuntimeError(f"numel={numel} with load_delta={load_delta} doesn't split "
+                           f"evenly across {num_remote} ranks.")
+    heavy_chunk, light_chunk = int(heavy_chunk), int(light_chunk)
+
+    if balance == "uneven_internode":
+        # First half of nodes are heavy, second half light.
+        if num_nodes % 2 != 0:
+            raise RuntimeError(f"uneven_internode needs an even number of nodes, got {num_nodes}.")
+        is_heavy = [r // gpus_per_node < num_nodes // 2 for r in range(world)]
+        chunks = [heavy_chunk if heavy else light_chunk for heavy in is_heavy]
+        # Send my one chunk to every remote rank; receive each sender's own chunk.
+        my_chunk = chunks[rank]
+        send_splits = [0 if same else my_chunk for same in same_node]
+        recv_splits = [0 if same else chunks[r] for r, same in enumerate(same_node)]
+        return send_splits, recv_splits
+
+    if balance == "uneven_intranode":
+        # First half of local ranks on every node are heavy, second half light,
+        # so every node sends the same total.
+        if gpus_per_node % 2 != 0:
+            raise RuntimeError(f"uneven_intranode needs an even number of GPUs per node, "
+                               f"got {gpus_per_node}.")
+        is_heavy = [r % gpus_per_node < gpus_per_node // 2 for r in range(world)]
+        chunks = [heavy_chunk if heavy else light_chunk for heavy in is_heavy]
+        # Send my one chunk to every remote rank; receive each sender's own chunk.
+        my_chunk = chunks[rank]
+        send_splits = [0 if same else my_chunk for same in same_node]
+        recv_splits = [0 if same else chunks[r] for r, same in enumerate(same_node)]
+        return send_splits, recv_splits
+
+    raise ValueError(f"Unknown balance {balance}.")
 
 
 def benchmark(
     n: int,
     args: argparse.Namespace,
-    group: dist.ProcessGroup,
+    rank: int,
+    gpus_per_node: int,
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[int, list[float]]:
-    """Every rank sends N experts split across the other nodes at once.
+    """Every rank sends its experts split across all ranks on other nodes at once.
 
     Returns:
         nbytes: average bytes each rank sends in total.
@@ -97,27 +125,23 @@ def benchmark(
     """
     # Gated FFNN: gate [I, H] + up [I, H] + down [H, I].
     numel = n * 3 * args.hidden * args.intermediate
-    splits = get_split_matrix(numel, group.size(), args.balance)
-
-    # Send this node's row, receive this node's column.
-    my_node = group.rank()
-    send_splits = splits[my_node]
-    recv_splits = [row[my_node] for row in splits]
+    send_splits, recv_splits = get_splits(numel, rank, gpus_per_node,
+                                          args.balance, args.load_delta)
 
     send_buf = torch.randn(sum(send_splits), device=device, dtype=dtype)
     recv_buf = torch.empty(sum(recv_splits), device=device, dtype=dtype)
 
     for _ in range(args.warmup):
-        dist.all_to_all_single(recv_buf, send_buf, recv_splits, send_splits, group=group)
+        dist.all_to_all_single(recv_buf, send_buf, recv_splits, send_splits)
 
     starts = [torch.cuda.Event(enable_timing=True) for _ in range(args.iterations)]
     ends = [torch.cuda.Event(enable_timing=True) for _ in range(args.iterations)]
 
     for start, end in zip(starts, ends):
-        # Line all ranks up so every group's all-to-all starts together.
+        # Line all ranks up so each all-to-all is timed on its own.
         dist.barrier()
         start.record()
-        dist.all_to_all_single(recv_buf, send_buf, recv_splits, send_splits, group=group)
+        dist.all_to_all_single(recv_buf, send_buf, recv_splits, send_splits)
         end.record()
     torch.cuda.synchronize()
 
@@ -132,7 +156,6 @@ def main(args: argparse.Namespace) -> None:
     rank, world, device = init_dist()
     gpus_per_node = world // int(os.environ["SLURM_NNODES"])
     hosts = check_placement(gpus_per_node)
-    group = get_peer_group(rank, world, gpus_per_node)
     dtype = getattr(torch, args.dtype)
 
     if rank == 0:
@@ -144,7 +167,7 @@ def main(args: argparse.Namespace) -> None:
         )
 
     for n in args.experts:
-        nbytes, times = benchmark(n, args, group, device, dtype)
+        nbytes, times = benchmark(n, args, rank, gpus_per_node, device, dtype)
         if rank == 0:
             avg = sum(times) / len(times)
             per_rank_gbs = nbytes / (avg / 1000) / 1e9
@@ -171,9 +194,15 @@ if __name__ == "__main__":
                         help="moe_intermediate_size")
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"],
                         default="bfloat16")
-    parser.add_argument("--balance", choices=["even", "uneven"], default="even",
-                        help="even: every node sends n experts; uneven: first half "
-                             "of nodes send 1.5n, second half 0.5n")
+    parser.add_argument("--balance", choices=["even", "uneven_internode", "uneven_intranode"],
+                        default="even",
+                        help="even: every rank sends n experts; uneven_internode: ranks on "
+                             "the first half of nodes are heavy, the rest light; "
+                             "uneven_intranode: the first half of local ranks on every "
+                             "node are heavy, the rest light")
+    parser.add_argument("--load-delta", type=float, default=0.5,
+                        help="Heavy ranks send n * (1 + load_delta) experts, "
+                             "light ranks n * (1 - load_delta)")
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iterations", type=int, default=5)
     main(parser.parse_args())
