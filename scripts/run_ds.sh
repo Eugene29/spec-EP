@@ -21,16 +21,7 @@ export PYTHONPATH=$PWD/src:$PYTHONPATH
 mkdir -p "$LOGS/profile"
 
 # Broadcast the env tarball to every node
-if ! srun --ntasks-per-node=1 test -f /dev/shm/spec-EP.tar; then
-    sbcast -f /global/cfs/cdirs/m5421/eku/envs/spec-EP.tar /dev/shm/spec-EP.tar
-fi
-# Extract the env tarball to /dev/shm
-if ! srun --ntasks-per-node=1 test -d /dev/shm/spec-EP; then
-    srun --ntasks-per-node=1 tar -xf /dev/shm/spec-EP.tar -C /dev/shm
-fi
-
-# Only activates conda env, already bcasted.
-# Env actiavted on main and CONDA_PREFIX bcasted
+module load conda
 source ~/conda_trick.sh
 
 # TODO: Logger info

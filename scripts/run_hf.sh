@@ -1,3 +1,4 @@
+module load conda
 source ~/conda_trick.sh
 
 echo "Running qwen model..."
